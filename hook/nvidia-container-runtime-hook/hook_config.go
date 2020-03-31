@@ -26,6 +26,9 @@ type HookConfig struct {
 	DisableRequire bool    `toml:"disable-require"`
 	SwarmResource  *string `toml:"swarm-resource"`
 
+	// used on docker/kubernetes to make sure only mount GPU when the GPU UUIDs have been specified.
+	MountGPUOnlyByUUID bool `toml:"mount-gpu-only-by-uuid"`
+
 	NvidiaContainerCLI CLIConfig `toml:"nvidia-container-cli"`
 }
 

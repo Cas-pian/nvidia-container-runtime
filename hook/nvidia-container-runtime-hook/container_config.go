@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -21,7 +22,21 @@ const (
 	defaultCapability       = "utility"
 	allCapabilities         = "compute,compat32,graphics,utility,video,display"
 	envNVDisableRequire     = "NVIDIA_DISABLE_REQUIRE"
+
+	// Please referer to these docs:
+	// https://docs.nvidia.com/deploy/nvml-api/group__nvmlDeviceQueries.html#group__nvmlDeviceQueries_1g84dca2d06974131ccec1651428596191
+	// https://github.com/NVIDIA/libnvidia-container/blob/master/src/cli/common.c#L11
+	// If GPU UUID is wrong or doesn't exist, nvidia-container-cli which is called by this hook will report with failure
+	nvidiaGPUUUIDListFmt = `^[gG][pP][uU]-([0-9a-fA-F-]){1,75}(,|,[gG][pP][uU]-([0-9a-fA-F-]){1,75})*$`
+
+	errGPUCanOnlyBeUsedByUUID = "Wrong way to use GPUs! " +
+		"If you dont't need GPU, use an image without CUDA, or build images with env " + envNVGPU + "=none. " +
+		"Otherwise set pod.spec.containers[*].resources.requests['nvidia.com/gpu'] for kubernetes, " +
+		"or set env " + envNVGPU + "={GPU UUID} for docker. "
 )
+
+var nvidiaGPUUUIDListExp = regexp.MustCompile(nvidiaGPUUUIDListFmt)
+var noneGPU = "none"
 
 type nvidiaConfig struct {
 	Devices        string
@@ -79,14 +94,22 @@ func parseCudaVersion(cudaVersion string) (vmaj, vmin, vpatch uint32) {
 	return
 }
 
-func getEnvMap(e []string) (m map[string]string) {
+func getEnvMap(e []string, mountGPUOnlyByUUID bool) (m map[string]string) {
 	m = make(map[string]string)
 	for _, s := range e {
 		p := strings.SplitN(s, "=", 2)
 		if len(p) != 2 {
 			log.Panicln("environment error")
 		}
-		m[p[0]] = p[1]
+
+		if mountGPUOnlyByUUID && p[0] == envNVGPU {
+			if _, in := m[p[0]]; !in || (in && nvidiaGPUUUIDListExp.MatchString(p[1])) {
+				// the last value with 'GPU-' prefix has the highest priority, otherwise use the first value
+				m[p[0]] = p[1]
+			}
+		} else {
+			m[p[0]] = p[1]
+		}
 	}
 	return
 }
@@ -110,19 +133,39 @@ func loadSpec(path string) (spec *Spec) {
 	return
 }
 
-func getDevices(env map[string]string) *string {
+func getDevices(env map[string]string, mountGPUOnlyByUUID bool) *string {
 	gpuVars := []string{envNVGPU}
 	if envSwarmGPU != nil {
 		// The Swarm resource has higher precedence.
 		gpuVars = append([]string{*envSwarmGPU}, gpuVars...)
 	}
 
+	var ret *string
 	for _, gpuVar := range gpuVars {
 		if devices, ok := env[gpuVar]; ok {
-			return &devices
+			ret = &devices
 		}
 	}
-	return nil
+
+	if !mountGPUOnlyByUUID { // old way
+		return ret
+	}
+
+	if ret == nil || *ret == "" || *ret == "void" || *ret == "none" {
+		// handle empty, 'void', 'none' first, cause different logic between old and new CUDA images
+		// new cuda image: unset and empty equals void
+		// old cuda image: unset means all, empty equals void
+		return ret
+	}
+
+	// disable use GPU on value: all or 0,1,2,3, only GPU UUID list seperated by ',' is supported,
+	// so that in k8s no GPU will be mounted in multi containers (allocated by scheduler and set by device plugin)
+	if nvidiaGPUUUIDListExp.MatchString(*ret) {
+		return ret
+	}
+
+	log.Println(errGPUCanOnlyBeUsedByUUID)
+	return &noneGPU // should not execute this
 }
 
 func getCapabilities(env map[string]string) *string {
@@ -144,11 +187,16 @@ func getRequirements(env map[string]string) []string {
 }
 
 // Mimic the new CUDA images if no capabilities or devices are specified.
-func getNvidiaConfigLegacy(env map[string]string) *nvidiaConfig {
+func getNvidiaConfigLegacy(env map[string]string, mountGPUOnlyByUUID bool) *nvidiaConfig {
 	var devices string
-	if d := getDevices(env); d == nil {
-		// Environment variable unset: default to "all".
-		devices = "all"
+	if d := getDevices(env, mountGPUOnlyByUUID); d == nil {
+		if !mountGPUOnlyByUUID {
+			// Environment variable unset: default to "all".
+			devices = "all"
+		} else {
+			devices = "none"
+			log.Println(errGPUCanOnlyBeUsedByUUID)
+		}
 	} else if len(*d) == 0 || *d == "void" {
 		// Environment variable empty or "void": not a GPU container.
 		return nil
@@ -192,16 +240,16 @@ func getNvidiaConfigLegacy(env map[string]string) *nvidiaConfig {
 	}
 }
 
-func getNvidiaConfig(env map[string]string) *nvidiaConfig {
+func getNvidiaConfig(env map[string]string, mountGPUOnlyByUUID bool) *nvidiaConfig {
 	legacyCudaVersion := env[envLegacyCUDAVersion]
 	cudaRequire := env[envNVRequireCUDA]
 	if len(legacyCudaVersion) > 0 && len(cudaRequire) == 0 {
 		// Legacy CUDA image detected.
-		return getNvidiaConfigLegacy(env)
+		return getNvidiaConfigLegacy(env, mountGPUOnlyByUUID)
 	}
 
 	var devices string
-	if d := getDevices(env); d == nil || len(*d) == 0 || *d == "void" {
+	if d := getDevices(env, mountGPUOnlyByUUID); d == nil || len(*d) == 0 || *d == "void" {
 		// Environment variable unset or empty or "void": not a GPU container.
 		return nil
 	} else {
@@ -251,12 +299,12 @@ func getContainerConfig(hook HookConfig) (config containerConfig) {
 
 	s := loadSpec(path.Join(b, "config.json"))
 
-	env := getEnvMap(s.Process.Env)
+	env := getEnvMap(s.Process.Env, hook.MountGPUOnlyByUUID)
 	envSwarmGPU = hook.SwarmResource
 	return containerConfig{
 		Pid:    h.Pid,
 		Rootfs: s.Root.Path,
 		Env:    env,
-		Nvidia: getNvidiaConfig(env),
+		Nvidia: getNvidiaConfig(env, hook.MountGPUOnlyByUUID),
 	}
 }
