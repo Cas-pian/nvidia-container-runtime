@@ -11,7 +11,9 @@ Because there are some users use the official cuda images which set environment 
 this will make the container mount all GPUs in container which is not expected in k8s (GPUs should be mounted according to the allocation by k8s schedule and nvidia device plugin).  
 To avoid this, use config `mount-gpu-only-by-uuid` in config.toml to change the default behavior of `NVIDIA_VISIBLE_DEVICES`.  
 
-Note: since the master of nvidia-container-runtime has changed lots of times which lacked the source of nvidia-container-runtime-hook, I decide to modify on the 1.3.0 version.  
+Note:  
+1. since the master of nvidia-container-runtime has changed lots of times which lacked the source of nvidia-container-runtime-hook, I decide to modify on the 1.3.0 version.  
+1. Related issue: https://github.com/NVIDIA/k8s-device-plugin/issues/61
 
 ## Usage example
 
