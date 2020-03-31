@@ -5,6 +5,14 @@
 A modified version of [runc](https://github.com/opencontainers/runc) adding a custom [pre-start hook](https://github.com/opencontainers/runtime-spec/blob/master/config.md#prestart) to all containers.  
 If environment variable `NVIDIA_VISIBLE_DEVICES` is set in the OCI spec, the hook will configure GPU access for the container by leveraging `nvidia-container-cli` from project [libnvidia-container](https://github.com/NVIDIA/libnvidia-container).
 
+## My optimize point
+Add switch to turn off the action of mount GPU by index or value `all` of environment `NVIDIA_VISIBLE_DEVICES`.  
+Because there are some users use the official cuda images which set environment `NVIDIA_VISIBLE_DEVICES` to all,  
+this will make the container mount all GPUs in container which is not expected in k8s (GPUs should be mounted according to the allocation by k8s schedule and nvidia device plugin).  
+To avoid this, use config `mount-gpu-only-by-uuid` in config.toml to change the default behavior of `NVIDIA_VISIBLE_DEVICES`.  
+
+Note: since the master of nvidia-container-runtime has changed lots of times which lacked the source of nvidia-container-runtime-hook, I decide to modify on the 1.3.0 version.  
+
 ## Usage example
 
 ```sh
